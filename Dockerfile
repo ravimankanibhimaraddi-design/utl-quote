@@ -1,8 +1,10 @@
-FROM public.ecr.aws/shelf/lambda-libreoffice-base:25.2-python3.13-x86_64
+FROM public.ecr.aws/lambda/python:3.10
+
+RUN yum install -y libxml2 libxslt && yum clean all
 
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY lambda_function.py /var/task/
+COPY lambda_function.py .
 
 CMD ["lambda_function.lambda_handler"]

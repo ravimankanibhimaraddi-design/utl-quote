@@ -4,7 +4,6 @@ import os
 import time
 import urllib.request
 import re
-import subprocess
 from datetime import datetime
 from docx import Document
 from docx.shared import Pt
@@ -18,7 +17,12 @@ if not BOT_TOKEN:
 TABLE_NAME = "quotation_bot_sessions"
 TEMPLATE_BUCKET = "utl-quote-template-bucket"
 OUTPUT_BUCKET = "quote-output-bucket"
-TEMPLATE_KEY = "template.docx"
+
+# 🔹 MULTI TEMPLATE MAP
+TEMPLATE_KEYS = {
+    "On-Grid": "template_ongrid.docx",
+    "Hybrid": "template_hybrid.docx"
+}
 
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(TABLE_NAME)
@@ -46,6 +50,9 @@ OPTIONS = {
         "UTL 580 Watt TOPCon Bifacial",
         "575 Watt TOPCon DCR Bi-Facial Dual Glass",
         "590 Watt N-Type TOPCon Solar Module",
+        "510 Watt/24 Volt Bifacial N-Type TOPCon Solar Pane",
+        "535 Watt TOPCon Bi-Facial Solar Panel",
+        "525 Watt TOPCon DCR Solar Panel (24 Volt)",
         "530 Watt Mono PERC Solar Panel"
     ],
     "SPV_MODULE": [
@@ -139,19 +146,15 @@ def replace_docx(doc, data):
     def replace_in_paragraph(p):
         full_text = "".join(run.text for run in p.runs)
         updated = False
-
         for k, v in data.items():
             placeholder = f"{{{{{k}}}}}"
             if placeholder in full_text:
                 full_text = full_text.replace(placeholder, v)
                 updated = True
-
         if not updated:
             return
-
         for run in p.runs:
             run.text = ""
-
         run = p.runs[0]
         run.text = full_text
         run.font.name = "Arial"
@@ -169,21 +172,6 @@ def replace_docx(doc, data):
                     if p.runs:
                         replace_in_paragraph(p)
 
-# ================= DOCX → PDF =================
-def convert_docx_to_pdf(docx_path):
-    subprocess.run(
-        [
-            "soffice",
-            "--headless",
-            "--nologo",
-            "--nofirststartwizard",
-            "--convert-to", "pdf",
-            docx_path,
-            "--outdir", "/tmp"
-        ],
-        check=True
-    )
-
 # ================= ASK NEXT =================
 def ask_next(chat_id, session):
     step = session["step"]
@@ -194,38 +182,38 @@ def ask_next(chat_id, session):
     elif step == "PRICE":
         tg_send(chat_id, "Enter total price (numbers only):")
     elif step is None:
-        generate_files(chat_id, session)
+        generate_docx(chat_id, session)
 
-# ================= FINAL FILE GENERATION =================
-def generate_files(chat_id, session):
+# ================= DOCX GENERATION =================
+def generate_docx(chat_id, session):
     session["PRICE_IN_WORDS"] = number_to_words(int(session["PRICE"]))
     session["DATE"] = datetime.now().strftime("%d-%m-%Y")
 
-    s3.download_file(TEMPLATE_BUCKET, TEMPLATE_KEY, "/tmp/template.docx")
-    doc = Document("/tmp/template.docx")
+    inverter_type = session.get("INVERTER_TYPE", "On-Grid")
+    template_key = TEMPLATE_KEYS.get(inverter_type, TEMPLATE_KEYS["On-Grid"])
+
+    local_template = "/tmp/template.docx"
+    s3.download_file(TEMPLATE_BUCKET, template_key, local_template)
+
+    doc = Document(local_template)
     replace_docx(doc, session)
 
-    base = f"QUOTE_{session['CLIENT_NAME'].replace(' ','_')}_{session['CAPACITY'].replace(' ','_')}"
-    docx_path = f"/tmp/{base}.docx"
-    pdf_path = f"/tmp/{base}.pdf"
+    filename = f"QUOTE_{session['CLIENT_NAME'].replace(' ','_')}_{session['CAPACITY'].replace(' ','_')}.docx"
+    path = f"/tmp/{filename}"
 
-    doc.save(docx_path)
-    s3.upload_file(docx_path, OUTPUT_BUCKET, f"{base}.docx")
+    doc.save(path)
+    s3.upload_file(path, OUTPUT_BUCKET, filename)
 
-    convert_docx_to_pdf(docx_path)
-    s3.upload_file(pdf_path, OUTPUT_BUCKET, f"{base}.pdf")
+    url = s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": OUTPUT_BUCKET, "Key": filename},
+        ExpiresIn=900
+    )
 
-    docx_url = s3.generate_presigned_url("get_object",
-        Params={"Bucket": OUTPUT_BUCKET, "Key": f"{base}.docx"}, ExpiresIn=900)
-    pdf_url = s3.generate_presigned_url("get_object",
-        Params={"Bucket": OUTPUT_BUCKET, "Key": f"{base}.pdf"}, ExpiresIn=900)
-
-    tg_send_html(chat_id, f"""
-<b>Quotation Ready 📄</b>
-
-📎 <a href="{docx_url}">Download DOCX</a>
-📑 <a href="{pdf_url}">Download PDF</a>
-""")
+    tg_send_html(
+        chat_id,
+        f"<b>Quotation ready 📄</b>\n\n<a href=\"{url}\">⬇️ Download {filename}</a>"
+    )
 
     clear_session(chat_id)
 
@@ -290,10 +278,9 @@ def lambda_handler(event, context):
         if not clean:
             tg_send(chat_id, "❌ Invalid price. Example: 350000")
             return {"statusCode": 200}
-
         session["PRICE"] = clean
         save_session(chat_id, session)
-        generate_files(chat_id, session)
+        generate_docx(chat_id, session)
         return {"statusCode": 200}
 
     return {"statusCode": 200}
