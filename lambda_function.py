@@ -43,17 +43,20 @@ FLOW_STEPS = [
     "PRICE"
 ]
 
+# 🔹 HYBRID ONLY STEPS
+HYBRID_STEPS = [
+    "BATTERY_NAME",
+    "NO_BATTERIES",
+    "BATTERY_WARRANTY"
+]
+
 # ================= OPTIONS =================
 OPTIONS = {
     "CAPACITY": ["3 KW", "5 KW", "6 KW", "10 KW"],
     "SOLAR_PANEL_MODEL": [
         "UTL 580 Watt TOPCon Bifacial",
         "575 Watt TOPCon DCR Bi-Facial Dual Glass",
-        "590 Watt N-Type TOPCon Solar Module",
-        "510 Watt/24 Volt Bifacial N-Type TOPCon Solar Pane",
-        "535 Watt TOPCon Bi-Facial Solar Panel",
-        "525 Watt TOPCon DCR Solar Panel (24 Volt)",
-        "530 Watt Mono PERC Solar Panel"
+        "590 Watt N-Type TOPCon Solar Module"
     ],
     "SPV_MODULE": [
         "Mono Half Cut",
@@ -116,7 +119,15 @@ def save_session(chat_id, data):
 def clear_session(chat_id):
     table.delete_item(Key={"chat_id": str(chat_id)})
 
-def next_step(step):
+# 🔹 STEP RESOLUTION (UPDATED)
+def next_step(step, session):
+    if step == "PRICE" and session.get("INVERTER_TYPE") == "Hybrid":
+        return HYBRID_STEPS[0]
+
+    if step in HYBRID_STEPS:
+        idx = HYBRID_STEPS.index(step)
+        return HYBRID_STEPS[idx + 1] if idx + 1 < len(HYBRID_STEPS) else None
+
     idx = FLOW_STEPS.index(step)
     return FLOW_STEPS[idx + 1] if idx + 1 < len(FLOW_STEPS) else None
 
@@ -146,15 +157,19 @@ def replace_docx(doc, data):
     def replace_in_paragraph(p):
         full_text = "".join(run.text for run in p.runs)
         updated = False
+
         for k, v in data.items():
             placeholder = f"{{{{{k}}}}}"
             if placeholder in full_text:
                 full_text = full_text.replace(placeholder, v)
                 updated = True
+
         if not updated:
             return
+
         for run in p.runs:
             run.text = ""
+
         run = p.runs[0]
         run.text = full_text
         run.font.name = "Arial"
@@ -175,14 +190,11 @@ def replace_docx(doc, data):
 # ================= ASK NEXT =================
 def ask_next(chat_id, session):
     step = session["step"]
+
     if step in OPTIONS:
         tg_send(chat_id, f"Select {step.replace('_',' ').title()}:", build_keyboard(step, OPTIONS[step]))
-    elif step in ["SANCTIONED_LOAD", "INVERTER", "NO_INVERTER", "NO_PANELS"]:
+    else:
         tg_send(chat_id, f"Enter {step.replace('_',' ').title()}:")
-    elif step == "PRICE":
-        tg_send(chat_id, "Enter total price (numbers only):")
-    elif step is None:
-        generate_docx(chat_id, session)
 
 # ================= DOCX GENERATION =================
 def generate_docx(chat_id, session):
@@ -190,7 +202,7 @@ def generate_docx(chat_id, session):
     session["DATE"] = datetime.now().strftime("%d-%m-%Y")
 
     inverter_type = session.get("INVERTER_TYPE", "On-Grid")
-    template_key = TEMPLATE_KEYS.get(inverter_type, TEMPLATE_KEYS["On-Grid"])
+    template_key = TEMPLATE_KEYS.get(inverter_type)
 
     local_template = "/tmp/template.docx"
     s3.download_file(TEMPLATE_BUCKET, template_key, local_template)
@@ -228,13 +240,13 @@ def lambda_handler(event, context):
         session = get_session(chat_id) or {}
 
         if value == "OTHER":
-            session["step"] = f"OTHER_{field}"
+            session["step"] = field
             save_session(chat_id, session)
-            tg_send(chat_id, f"Please enter {field.replace('_',' ').title()}:")
+            tg_send(chat_id, f"Enter {field.replace('_',' ').title()}:")
             return {"statusCode": 200}
 
         session[field] = OPTIONS[field][int(value)]
-        session["step"] = next_step(field)
+        session["step"] = next_step(field, session)
         save_session(chat_id, session)
         ask_next(chat_id, session)
         return {"statusCode": 200}
@@ -257,30 +269,13 @@ def lambda_handler(event, context):
         return {"statusCode": 200}
 
     step = session["step"]
+    session[step] = text
+    session["step"] = next_step(step, session)
+    save_session(chat_id, session)
 
-    if step.startswith("OTHER_"):
-        field = step.replace("OTHER_", "")
-        session[field] = text
-        session["step"] = next_step(field)
-        save_session(chat_id, session)
+    if session["step"]:
         ask_next(chat_id, session)
-        return {"statusCode": 200}
-
-    if step in ["CLIENT_NAME","SANCTIONED_LOAD","INVERTER","NO_INVERTER","NO_PANELS"]:
-        session[step] = text
-        session["step"] = next_step(step)
-        save_session(chat_id, session)
-        ask_next(chat_id, session)
-        return {"statusCode": 200}
-
-    if step == "PRICE":
-        clean = re.sub(r"[^\d]", "", text)
-        if not clean:
-            tg_send(chat_id, "❌ Invalid price. Example: 350000")
-            return {"statusCode": 200}
-        session["PRICE"] = clean
-        save_session(chat_id, session)
+    else:
         generate_docx(chat_id, session)
-        return {"statusCode": 200}
 
     return {"statusCode": 200}
