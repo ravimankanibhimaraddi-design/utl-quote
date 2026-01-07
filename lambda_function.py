@@ -66,7 +66,12 @@ OPTIONS = {
         "TOPCon DCR Solar"
     ],
     "INVERTER_TYPE": ["On-Grid", "Hybrid"],
-    "PHASE": ["Single Phase", "Three Phase"]
+    "PHASE": ["Single Phase", "Three Phase"],
+    "BATTERY_NAME": [
+        "Lithium Battery",
+        "Tubular Battery",
+        "LFP Battery"
+    ]
 }
 
 # ================= TELEGRAM =================
@@ -119,14 +124,13 @@ def save_session(chat_id, data):
 def clear_session(chat_id):
     table.delete_item(Key={"chat_id": str(chat_id)})
 
-# 🔹 STEP RESOLUTION (UPDATED)
 def next_step(step, session):
-    if step == "PRICE" and session.get("INVERTER_TYPE") == "Hybrid":
+    if step == "NO_INVERTER" and session.get("INVERTER_TYPE") == "Hybrid":
         return HYBRID_STEPS[0]
 
     if step in HYBRID_STEPS:
         idx = HYBRID_STEPS.index(step)
-        return HYBRID_STEPS[idx + 1] if idx + 1 < len(HYBRID_STEPS) else None
+        return HYBRID_STEPS[idx + 1] if idx + 1 < len(HYBRID_STEPS) else "PHASE"
 
     idx = FLOW_STEPS.index(step)
     return FLOW_STEPS[idx + 1] if idx + 1 < len(FLOW_STEPS) else None
@@ -190,7 +194,6 @@ def replace_docx(doc, data):
 # ================= ASK NEXT =================
 def ask_next(chat_id, session):
     step = session["step"]
-
     if step in OPTIONS:
         tg_send(chat_id, f"Select {step.replace('_',' ').title()}:", build_keyboard(step, OPTIONS[step]))
     else:
@@ -201,12 +204,10 @@ def generate_docx(chat_id, session):
     session["PRICE_IN_WORDS"] = number_to_words(int(session["PRICE"]))
     session["DATE"] = datetime.now().strftime("%d-%m-%Y")
 
-    inverter_type = session.get("INVERTER_TYPE", "On-Grid")
-    template_key = TEMPLATE_KEYS.get(inverter_type)
-
+    template_key = TEMPLATE_KEYS.get(session.get("INVERTER_TYPE", "On-Grid"))
     local_template = "/tmp/template.docx"
-    s3.download_file(TEMPLATE_BUCKET, template_key, local_template)
 
+    s3.download_file(TEMPLATE_BUCKET, template_key, local_template)
     doc = Document(local_template)
     replace_docx(doc, session)
 
