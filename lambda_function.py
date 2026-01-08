@@ -264,6 +264,12 @@ def lambda_handler(event, context):
         tg_send(chat_id, "Enter customer name:")
         return {"statusCode": 200}
 
+    if text == "/reset":
+        clear_session(chat_id)
+        tg_send(chat_id, "✅ Session reset. Send /quote to start again.")
+        return {"statusCode": 200}
+    
+
     session = get_session(chat_id)
     if not session:
         tg_send(chat_id, "Send /quote to start quotation")
@@ -280,3 +286,4 @@ def lambda_handler(event, context):
         generate_docx(chat_id, session)
 
     return {"statusCode": 200}
+
