@@ -18,7 +18,6 @@ TABLE_NAME = "quotation_bot_sessions"
 TEMPLATE_BUCKET = "utl-quote-template-bucket"
 OUTPUT_BUCKET = "quote-output-bucket"
 
-# 🔹 MULTI TEMPLATE MAP
 TEMPLATE_KEYS = {
     "On-Grid": "template_ongrid.docx",
     "Hybrid": "template_hybrid.docx"
@@ -28,7 +27,7 @@ dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(TABLE_NAME)
 s3 = boto3.client("s3")
 
-# ================= FLOW ORDER =================
+# ================= FLOW =================
 FLOW_STEPS = [
     "CLIENT_NAME",
     "CAPACITY",
@@ -43,14 +42,12 @@ FLOW_STEPS = [
     "PRICE"
 ]
 
-# 🔹 HYBRID ONLY STEPS
 HYBRID_STEPS = [
     "BATTERY_NAME",
     "NO_BATTERIES",
     "BATTERY_WARRANTY"
 ]
 
-# ================= OPTIONS =================
 OPTIONS = {
     "CAPACITY": ["3 KW", "5 KW", "6 KW", "10 KW"],
     "SOLAR_PANEL_MODEL": [
@@ -109,7 +106,6 @@ def build_keyboard(field, items, cols=2):
             row = []
     if row:
         keyboard.append(row)
-    keyboard.append([{"text": "Other", "callback_data": f"{field}__OTHER"}])
     return {"inline_keyboard": keyboard}
 
 # ================= SESSION =================
@@ -154,42 +150,37 @@ def number_to_words(n):
         res += three(n)
     return res.strip() + " Only"
 
-# ================= DOCX REPLACEMENT =================
+# ================= DOCX =================
 def replace_docx(doc, data):
     data = {k: str(v) for k, v in data.items()}
 
-    def replace_in_paragraph(p):
-        full_text = "".join(run.text for run in p.runs)
-        updated = False
-
+    def replace_para(p):
+        full = "".join(r.text for r in p.runs)
+        changed = False
         for k, v in data.items():
-            placeholder = f"{{{{{k}}}}}"
-            if placeholder in full_text:
-                full_text = full_text.replace(placeholder, v)
-                updated = True
-
-        if not updated:
+            if f"{{{{{k}}}}}" in full:
+                full = full.replace(f"{{{{{k}}}}}", v)
+                changed = True
+        if not changed:
             return
-
-        for run in p.runs:
-            run.text = ""
-
-        run = p.runs[0]
-        run.text = full_text
-        run.font.name = "Arial"
-        run.font.size = Pt(11)
-        run._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+        for r in p.runs:
+            r.text = ""
+        r = p.runs[0]
+        r.text = full
+        r.font.name = "Arial"
+        r.font.size = Pt(11)
+        r._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
 
     for p in doc.paragraphs:
         if p.runs:
-            replace_in_paragraph(p)
+            replace_para(p)
 
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for p in cell.paragraphs:
+    for t in doc.tables:
+        for r in t.rows:
+            for c in r.cells:
+                for p in c.paragraphs:
                     if p.runs:
-                        replace_in_paragraph(p)
+                        replace_para(p)
 
 # ================= ASK NEXT =================
 def ask_next(chat_id, session):
@@ -205,10 +196,9 @@ def generate_docx(chat_id, session):
     session["DATE"] = datetime.now().strftime("%d-%m-%Y")
 
     template_key = TEMPLATE_KEYS.get(session.get("INVERTER_TYPE", "On-Grid"))
-    local_template = "/tmp/template.docx"
+    s3.download_file(TEMPLATE_BUCKET, template_key, "/tmp/template.docx")
 
-    s3.download_file(TEMPLATE_BUCKET, template_key, local_template)
-    doc = Document(local_template)
+    doc = Document("/tmp/template.docx")
     replace_docx(doc, session)
 
     filename = f"QUOTE_{session['CLIENT_NAME'].replace(' ','_')}_{session['CAPACITY'].replace(' ','_')}.docx"
@@ -223,67 +213,75 @@ def generate_docx(chat_id, session):
         ExpiresIn=900
     )
 
-    tg_send_html(
-        chat_id,
-        f"<b>Quotation ready 📄</b>\n\n<a href=\"{url}\">⬇️ Download {filename}</a>"
-    )
-
+    tg_send_html(chat_id, f"<b>Quotation ready 📄</b>\n\n<a href='{url}'>⬇️ Download {filename}</a>")
     clear_session(chat_id)
 
-# ================= MAIN HANDLER =================
+# ================= MAIN =================
 def lambda_handler(event, context):
     body = json.loads(event.get("body", "{}"))
 
-    if "callback_query" in body:
-        cq = body["callback_query"]
-        chat_id = cq["message"]["chat"]["id"]
-        field, value = cq["data"].split("__")
-        session = get_session(chat_id) or {}
+    try:
+        # RESET
+        msg = body.get("message", {})
+        chat_id = msg.get("chat", {}).get("id")
+        text = msg.get("text", "").strip()
 
-        if value == "OTHER":
-            session["step"] = field
-            save_session(chat_id, session)
-            tg_send(chat_id, f"Enter {field.replace('_',' ').title()}:")
+        if text == "/reset":
+            clear_session(chat_id)
+            tg_send(chat_id, "✅ Session reset. Send /quote to start again.")
             return {"statusCode": 200}
 
-        session[field] = OPTIONS[field][int(value)]
-        session["step"] = next_step(field, session)
+        # CALLBACK
+        if "callback_query" in body:
+            cq = body["callback_query"]
+            chat_id = cq["message"]["chat"]["id"]
+            field, idx = cq["data"].split("__")
+            session = get_session(chat_id) or {}
+
+            session[field] = OPTIONS[field][int(idx)]
+            session["step"] = next_step(field, session)
+            save_session(chat_id, session)
+            ask_next(chat_id, session)
+            return {"statusCode": 200}
+
+        if not text:
+            return {"statusCode": 200}
+
+        if text == "/quote":
+            save_session(chat_id, {"step": "CLIENT_NAME"})
+            tg_send(chat_id, "Enter customer name:")
+            return {"statusCode": 200}
+
+        session = get_session(chat_id)
+        if not session:
+            tg_send(chat_id, "Send /quote to start quotation")
+            return {"statusCode": 200}
+
+        step = session["step"]
+
+        # 🔥 PRICE VALIDATION FIX
+        if step == "PRICE":
+            clean = re.sub(r"[^\d]", "", text)
+            if not clean or len(clean) < 4:
+                tg_send(chat_id, "❌ Invalid price. Example: 350000 or Rs 3,50,000")
+                return {"statusCode": 200}
+            session["PRICE"] = clean
+        else:
+            session[step] = text
+
+        session["step"] = next_step(step, session)
         save_session(chat_id, session)
-        ask_next(chat_id, session)
+
+        if session["step"]:
+            ask_next(chat_id, session)
+        else:
+            generate_docx(chat_id, session)
+
         return {"statusCode": 200}
 
-    message = body.get("message")
-    if not message:
-        return {"statusCode": 200}
-
-    chat_id = message["chat"]["id"]
-    text = message.get("text","").strip()
-
-    if text == "/quote":
-        save_session(chat_id, {"step": "CLIENT_NAME"})
-        tg_send(chat_id, "Enter customer name:")
-        return {"statusCode": 200}
-
-    if text == "/reset":
-        clear_session(chat_id)
-        tg_send(chat_id, "✅ Session reset. Send /quote to start again.")
-        return {"statusCode": 200}
+    except Exception:
+        if chat_id:
+            clear_session(chat_id)
+            tg_send(chat_id, "❌ Error occurred. Session reset. Send /quote again.")
+        raise
     
-
-    session = get_session(chat_id)
-    if not session:
-        tg_send(chat_id, "Send /quote to start quotation")
-        return {"statusCode": 200}
-
-    step = session["step"]
-    session[step] = text
-    session["step"] = next_step(step, session)
-    save_session(chat_id, session)
-
-    if session["step"]:
-        ask_next(chat_id, session)
-    else:
-        generate_docx(chat_id, session)
-
-    return {"statusCode": 200}
-
